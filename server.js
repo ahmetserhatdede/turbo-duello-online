@@ -1,104 +1,113 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const WebSocket = require('ws');
-
-const PORT = Number(process.env.PORT || 3000);
-const ROOT = path.join(__dirname, 'public');
-const TRACK = 2000;
-const ROAD_HALF = 160;
-const rooms = new Map();
-const mime = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png'};
-
-const server = http.createServer((req,res) => {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
-  const file = path.resolve(ROOT, '.' + (pathname === '/' ? '/index.html' : pathname));
-  if (!file.startsWith(ROOT + path.sep) && file !== path.join(ROOT,'index.html')) {res.writeHead(403); return res.end('Forbidden');}
-  fs.readFile(file,(err,data) => {
-    if (err) {res.writeHead(404); return res.end('Not found');}
-    res.writeHead(200, {'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control':'no-store'});
+'use strict';
+const http=require('http');
+const fs=require('fs');
+const path=require('path');
+const crypto=require('crypto');
+const WebSocket=require('ws');
+const Race=require('./public/race');
+const root=path.join(__dirname,'public');
+const rooms=new Map();
+const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp'};
+const server=http.createServer((req,res)=>{
+  let url;
+  try {url=new URL(req.url,'http://localhost');} catch {res.writeHead(400).end();return;}
+  const file=path.resolve(root,'.'+(url.pathname==='/'?'/index.html':url.pathname));
+  if(!file.startsWith(root+path.sep)){res.writeHead(403).end();return;}
+  fs.readFile(file,(err,data)=>{
+    if(err){res.writeHead(404).end('Not found');return;}
+    res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','Cache-Control':'no-store'});
     res.end(data);
   });
 });
-const wss = new WebSocket.Server({server});
-const send = (ws,obj) => {if(ws && ws.readyState === WebSocket.OPEN)ws.send(JSON.stringify(obj));};
-const broadcast = (room,obj) => room.players.forEach(p => send(p.ws,obj));
-function code() {let c; do {c=String(crypto.randomInt(100000,1000000));} while(rooms.has(c)); return c;}
-const cleanName = (n) => String(n || 'Oyuncu').trim().slice(0,16) || 'Oyuncu';
-function state(room) {return {type:'state',code:room.code,status:room.status,finishAt:TRACK,players:room.players.map(p=>({id:p.id,name:p.name,x:p.x,d:p.d,speed:p.speed,done:p.done,rank:p.rank})),countdown:room.countdown || 0};}
-function leave(ws) {
-  const room = ws.room;
-  if(!room)return;
-  room.players=room.players.filter(p=>p.ws!==ws);
-  ws.room=null;
-  if (!room.players.length) rooms.delete(room.code);
-  else {
-    room.status='waiting'; room.countdown=0;
-    room.players.forEach(p=>{p.ready=false;p.done=false;p.rank=0;p.speed=0;p.d=0;p.x=p.id===0?-72:72;});
-    broadcast(room,{type:'notice',message:'Diğer oyuncu ayrıldı. Yeni bir oyuncu bekleniyor.'});
-    broadcast(room,state(room));
+const sockets=new WebSocket.Server({server,maxPayload:4096});
+function send(ws,data){
+  if(ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify(data));
+}
+function sync(room) {
+  const r=room.race;
+  for(const s of room.seats){
+    if(s.ws.version===2) {
+      send(s.ws,{type:'state',code:room.code,hostId:room.seats[0].id,...r});
+    } else {
+      send(s.ws,{type:'state',code:room.code,status:r.status,countdown:r.countdown,finishAt:r.finishAt,
+        players:r.players.map(p=>({...p,x:p.x/Race.HALF*160,speed:p.v*3.6}))});
+    }
   }
 }
-function player(ws,name,id){return {ws,name:cleanName(name),id,x:id===0?-72:72,d:0,speed:0,done:false,rank:0,keys:{up:false,down:false,left:false,right:false}};}
-function begin(room){
-  if(room.players.length!==2 || !['waiting','finished'].includes(room.status))return;
-  room.players.forEach(p=>{p.x=p.id===0?-72:72;p.d=0;p.speed=0;p.done=false;p.rank=0;});
-  room.status='countdown'; room.countdown=3.5;
-  broadcast(room,state(room));
+function reset(room,status) {
+  room.inputs={};
+  room.race=Race.newRace(room.track,room.seats,status);
+  sync(room);
 }
-wss.on('connection',ws=>{
+function join(room,ws,name,car){
+  const id=room.seats.length;
+  room.seats.push({ws,id,name,car:Race.validIndex(car,Race.cars)});
+  ws.room=room;ws.driverId=id;
+  send(ws,{type:'joined',id,code:room.code});
+  reset(room,'waiting');
+}
+function leave(ws){
+  const room=ws.room;
+  if(!room)return;
+  ws.room=null;
+  room.seats=room.seats.filter(s=>s.ws!==ws);
+  if(!room.seats.length){rooms.delete(room.code);return;}
+  const host=room.seats[0];
+  if(host.id!==0){
+    host.id=0;host.ws.driverId=0;
+    send(host.ws,{type:'joined',id:0,code:room.code});
+  }
+  send(host.ws,{type:'notice',message:'Rakibin ayrıldı. Oda yeni bir oyuncuya açık.'});
+  reset(room,'waiting');
+}
+sockets.on('connection',ws=>{
   ws.on('message',raw=>{
-    let msg; try {msg=JSON.parse(raw.toString());}catch{return;}
-    if(!msg || typeof msg.type!=='string')return;
-    if(msg.type==='create'){
-      if(ws.room)leave(ws);
-      const c=code(),room={code:c,players:[player(ws,msg.name,0)],status:'waiting',countdown:0};
-      rooms.set(c,room);ws.room=room; send(ws,{type:'joined',code:c,id:0});broadcast(room,state(room));
-    }else if(msg.type==='join'){
-      if(ws.room)leave(ws);
-      const c=String(msg.code || '').trim(),room=rooms.get(c);
-      if(!room){send(ws,{type:'error',message:'Oda bulunamadı. Kodu kontrol et.'});return;}
-      if(room.players.length>=2){send(ws,{type:'error',message:'Bu oda dolu.'});return;}
-      const p=player(ws,msg.name,1);room.players.push(p);ws.room=room;
-      send(ws,{type:'joined',code:c,id:1});broadcast(room,{type:'notice',message:'İki oyuncu hazır! Oda sahibi yarışı başlatabilir.'});broadcast(room,state(room));
-    }else if(msg.type==='start'){
-      const r=ws.room;
-      if(r && r.players[0]?.ws===ws)begin(r);
-    }else if(msg.type==='input'){
-      const p=ws.room?.players.find(p=>p.ws===ws);
-      if(!p)return;
-      const k=msg.keys || {};
-      p.keys={up:k.up===true,down:k.down===true,left:k.left===true,right:k.right===true};
-    }else if(msg.type==='leave')leave(ws);
+    let m;
+    try {m=JSON.parse(raw.toString());} catch {return;}
+    if(!m || typeof m.type!=='string')return;
+    if(m.type==='create' || m.type==='join'){
+      const name=typeof m.name==='string'?m.name.trim().slice(0,16):'Pilot';
+      let room;
+      if(m.type==='create'){
+        let code;
+        do {code=String(crypto.randomInt(100000,1000000));} while(rooms.has(code));
+        room={code,track:Race.validIndex(m.track,Race.tracks),seats:[],inputs:{}};
+        rooms.set(code,room);
+      } else {
+        room=rooms.get(String(m.code || '').trim());
+        if(!room || room.seats.length>=2){
+          send(ws,{type:'error',message:room?'Bu oda dolu.':'Oda bulunamadı. Kodu kontrol et.'});return;
+        }
+        if(ws.room===room)return;
+      }
+      leave(ws);ws.version=m.version;
+      join(room,ws,name,m.car);
+    } else if(m.type==='leave') leave(ws);
+    else if(m.type==='start'){
+      const room=ws.room;
+      if(room?.seats[0].ws===ws && room.seats.length===2 && ['waiting','finished'].includes(room.race.status)) reset(room,'countdown');
+    } else if(m.type==='input' && ws.room && m.keys) {
+      const keys=Race.inputs();
+      for(const key of Object.keys(keys)) keys[key]=m.keys[key]===true;
+      ws.room.inputs[ws.driverId]=keys;ws.inputTime=Date.now();
+    }
   });
   ws.on('close',()=>leave(ws));
   ws.on('error',()=>{});
 });
-let last=Date.now();
+let previous=performance.now(),accumulator=0;
 setInterval(()=>{
-  const now=Date.now(),dt=Math.min(.08,(now-last)/1000);last=now;
+  const now=performance.now();
+  accumulator+=Math.min(.2,(now-previous)/1000);previous=now;
+  const ticks=Math.floor(accumulator*60);
+  accumulator-=ticks/60;
   for(const room of rooms.values()){
-    if(room.status==='countdown'){
-      room.countdown=Math.max(0,room.countdown-dt);
-      if(room.countdown===0)room.status='racing';
-    }
-    if(room.status==='racing'){
-      for(const p of room.players){
-        if(p.done)continue;
-        const k=p.keys;
-        const accel=k.up?150:(k.down?-220:-55);
-        p.speed=Math.max(0,Math.min(310,p.speed+accel*dt));
-        const turn=(k.right?1:0)-(k.left?1:0);
-        p.x+=turn*(95+0.38*p.speed)*dt;
-        if(Math.abs(p.x)>ROAD_HALF-18){p.x=Math.max(-ROAD_HALF+18,Math.min(ROAD_HALF-18,p.x));p.speed=Math.min(p.speed,95);}
-        p.d+=p.speed*dt;
-        if(p.d>=TRACK){p.d=TRACK;p.done=true;p.rank=room.players.filter(v=>v.done).length;}
-      }
-      if(room.players.every(p=>p.done)){room.status='finished';}
-    }
-    if(room.status!=='waiting')broadcast(room,state(room));
+    if(!['countdown','racing'].includes(room.race.status)) continue;
+    for(const seat of room.seats)
+      if(Date.now()-seat.ws.inputTime>1800) delete room.inputs[seat.id];
+    for(let i=0;i<ticks;i++) Race.step(room.race,room.inputs,1/60);
+    sync(room);
   }
 },50);
-setInterval(()=>{for(const [c,r] of rooms)if(!r.players.length)rooms.delete(c);},60000);
-server.listen(PORT,'0.0.0.0',()=>console.log(`Yaris hazir: http://localhost:${PORT}`));
+const port=Number(process.env.PORT||3000);
+server.listen(port,'0.0.0.0',()=>console.log('Turbo Düello · port '+port));
