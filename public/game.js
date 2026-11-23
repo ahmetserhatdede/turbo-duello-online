@@ -1,176 +1,331 @@
+'use strict';
+
 const $=id=>document.getElementById(id);
-const canvas=$('canvas'),ctx=canvas.getContext('2d');
-let ws=null,me=0,roomCode='',snapshot=null,notice='',connected=false;
-let previousState=null,stateTime=0;
-const keys={up:false,down:false,left:false,right:false};
-function connect(){return new Promise((resolve,reject)=>{
-  if(ws?.readyState===1)return resolve(ws);
-  const protocol=location.protocol==='https:'?'wss':'ws';
-  ws=new WebSocket(`${protocol}://${location.host}`);
-  ws.addEventListener('open',()=>{connected=true;resolve(ws)},{once:true});
-  ws.addEventListener('error',()=>reject(new Error('Sunucuya bağlanılamadı.')),{once:true});
-  ws.addEventListener('close',()=>{connected=false;$('status').textContent='Bağlantı kesildi';$('overlay').hidden=false;$('overlay').innerHTML='<h2>Bağlantı kesildi</h2><p>Sayfayı yenileyerek tekrar bağlan.</p>';});
-  ws.addEventListener('message',e=>{let m;try{m=JSON.parse(e.data)}catch{return}onMessage(m)});
-})}
-function emit(type,extra={}){if(ws?.readyState===1)ws.send(JSON.stringify({type,...extra}))}
-$('create').onclick=async()=>{try{await connect();emit('create',{name:$('name').value})}catch(e){$('error').textContent=e.message}};
-$('join').onclick=async()=>{const code=$('code').value.trim();if(!/^\d{6}$/.test(code)){$('error').textContent='6 haneli oda kodunu yaz.';return}try{await connect();emit('join',{code,name:$('name').value})}catch(e){$('error').textContent=e.message}};
-$('code').addEventListener('keydown',e=>{if(e.key==='Enter')$('join').click()});
-$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(roomCode);$('copy').textContent='KOPYALANDI';setTimeout(()=>$('copy').textContent='KOPYALA',1500)}catch{prompt('Oda kodu:',roomCode)}};
-$('leave').onclick=()=>{emit('leave');location.reload()};
-$('start').onclick=()=>emit('start');
-function onMessage(m){
- if(m.type==='error'){$('error').textContent=m.message;return}
- if(m.type==='joined'){me=m.id;roomCode=m.code;$('roomCode').textContent=m.code;$('lobby').hidden=true;$('game').hidden=false;return}
- if(m.type==='notice'){notice=m.message;return}
- if(m.type==='state'){
-   previousState=snapshot;stateTime=performance.now();snapshot=m;
-   const a=m.players[0],b=m.players[1];
-   $('p0').textContent=a?.name || 'Oyuncu 1';$('p1').textContent=b?.name || 'Rakip bekleniyor';
-   $('s0').textContent=`${Math.floor(a?.d||0)} m`;$('s1').textContent=`${Math.floor(b?.d||0)} m`;
-   const overlay=$('overlay'),start=$('start');
-   overlay.hidden=m.status==='racing';start.hidden=true;
-   if(m.status==='waiting'){
-     $('status').textContent=m.players.length===1?'Rakip bekleniyor': 'Başlamaya hazır';
-     overlay.querySelector('h2').textContent=m.players.length===1?'Rakibin bekleniyor...':'İki oyuncu hazır!';
-     overlay.querySelector('p').textContent=m.players.length===1?'Oda kodunu arkadaşına gönder':(me===0?'Yarışı başlatmak için butona bas.':'Oda sahibi yarışı başlatacak.');
-     start.hidden=!(m.players.length===2&&me===0);
-   }else if(m.status==='countdown'){
-     $('status').textContent='Yarış başlıyor';overlay.querySelector('h2').textContent=String(Math.max(1,Math.ceil(m.countdown-0.5)));
-     overlay.querySelector('p').textContent='Hazır, gaz!';
-   }else if(m.status==='racing'){$('status').textContent=`🏎️ ${Math.floor(m.players.find(p=>p.id===me)?.speed||0)} km/sa`}
-   else if(m.status==='finished'){
-     const winner=m.players.find(p=>p.rank===1);
-     $('status').textContent='Yarış bitti';overlay.querySelector('h2').textContent=winner?.id===me?'🏆 KAZANDIN!':'🏁 YARIŞ BİTTİ';
-     overlay.querySelector('p').textContent=`Kazanan: ${winner?.name||'Oyuncu'}`;start.hidden=me!==0;start.textContent='🔁 TEKRAR YARIŞ';
-   }
- }
-}
-const controlMap={w:'up',ArrowUp:'up',s:'down',ArrowDown:'down',a:'left',ArrowLeft:'left',d:'right',ArrowRight:'right'};
-window.addEventListener('keydown',e=>{const k=controlMap[e.key]||controlMap[e.key.toLowerCase?.()];if(k&&document.activeElement.tagName!=='INPUT'){keys[k]=true;e.preventDefault()}});
-window.addEventListener('keyup',e=>{const k=controlMap[e.key]||controlMap[e.key.toLowerCase?.()];if(k){keys[k]=false;e.preventDefault()}});
-window.addEventListener('blur',()=>{for(const k of Object.keys(keys))keys[k]=false});
-document.querySelectorAll('[data-key]').forEach(b=>{const k=b.dataset.key;b.addEventListener('pointerdown',e=>{e.preventDefault();keys[k]=true;b.setPointerCapture(e.pointerId)});for(const event of ['pointerup','pointercancel','lostpointercapture'])b.addEventListener(event,()=>keys[k]=false)});
-setInterval(()=>{if(snapshot?.status==='racing')emit('input',{keys})},50);
-// Perspective camera and deterministic scenery shared by both drivers.
-canvas.width=960;
-canvas.height=540;
-const W=canvas.width,H=canvas.height, horizon=166, focal=560, step=8;
-const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
-const center=z=>36*Math.sin(z/125)+20*Math.sin(z/69);
-const altitude=z=>5*Math.sin(z/96)+1.8*Math.sin(z/46);
-const random=n=>{const v=Math.sin(n*127.1+311.7)*43758.5453;return v-Math.floor(v)};
-let camX=0,camY=0,camZ=0,yaw=0,pitch=0;
-function project(x,y,z){
- const depth=Math.max(0.5,z-camZ),scale=focal/depth;
- return [W/2+(x-camX-depth*yaw)*scale,horizon-(y-camY-depth*pitch)*scale];
-}
-function roadPoint(z,offset,height=0){return project(center(z)+offset,altitude(z)+height,z)}
-function face(points,color){
- ctx.fillStyle=color;ctx.beginPath();ctx.moveTo(...points[0]);
- for(let i=1;i<points.length;i++)ctx.lineTo(...points[i]);
- ctx.closePath();ctx.fill();
-}
-function strip(z,end,left,right,color,height=0){
- face([roadPoint(z,left,height),roadPoint(end,left,height),roadPoint(end,right,height),roadPoint(z,right,height)],color);
-}
-const sky=ctx.createLinearGradient(0,0,0,230);
-sky.addColorStop(0,'#5494be');sky.addColorStop(.64,'#b7d6df');sky.addColorStop(1,'#ffe5bf');
-function landscape(){
- ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
- const sun=690-yaw*150;
- const glow=ctx.createRadialGradient(sun,70,4,sun,70,87);
- glow.addColorStop(0,'#fff9dc');glow.addColorStop(.14,'#fff4d5');glow.addColorStop(.2,'#ffedc38c');glow.addColorStop(1,'#ffedc300');
- ctx.fillStyle=glow;ctx.fillRect(sun-88,-18,176,176);
- for(let layer=0;layer<3;layer++){
-  const offset=yaw*(95+layer*70)+camZ*(.012+layer*.009);
-  const ridge=x=>{const n=x+offset;return 121+layer*29+31*Math.sin(n/99+layer*2)+15*Math.sin(n/38+layer)+7*Math.sin(n/14)+2*Math.sin(n/6)};
-  const colors=['#99b5c6','#7e9eac','#608786'];
-  let points=[[-4,H]];
-  for(let x=-4;x<=W+4;x+=4)points.push([x,ridge(x)]);
-  points.push([W+4,H]);face(points,colors[layer]);
-  for(let i=-3;i<27;i++){
-   const x=i*47-offset%47,y=ridge(x);
-   face([[x,y],[x+9,ridge(x+9)],[x+37,y+37],[x+21,y+22]],['#aec3cb','#8eacb6','#719390'][layer]);
+const modeNames={solo:'Tek kişilik',split:'Bölünmüş ekran',online:'Çevrimiçi'};
+const hints={
+  solo:'Üç bot pilota karşı yarış. Her biri kendi aracını ve rotasını seçer.',
+  split:'İki oyuncu, tek klavye. Her oyuncunun kendi aracı, kamerası ve nitrosu var.',
+  online:'Bir oda kur veya arkadaşının 6 haneli koduyla katıl. Pisti oda sahibi seçer.'
+};
+let prefs={mode:'solo',track:0,cars:[0,1],names:['Pilot 1','Pilot 2']};
+try {
+  const p=JSON.parse(localStorage.getItem('turbo-duello-garaj') || '{}');
+  if(Object.hasOwn(modeNames,p.mode))prefs.mode=p.mode;
+  prefs.track=Race.validIndex(p.track,Race.tracks);
+  for(let i=0;i<2;i++){
+    if(Number.isInteger(p.cars?.[i]))prefs.cars[i]=Race.validIndex(p.cars[i],Race.cars);
+    if(typeof p.names?.[i]==='string' && p.names[i].trim())prefs.names[i]=p.names[i].slice(0,16);
   }
- }
+} catch {}
+const save=()=>{try{localStorage.setItem('turbo-duello-garaj',JSON.stringify(prefs));}catch{}};
+const keyState=[Race.inputs(),Race.inputs()];
+let editSeat=0,mode='',race=null,paused=false,busy=false,disconnected=false;
+let socket=null,myId=0,hostId=0,roomCode='',notice='',views=[],previous=null,stateAt=0;
+let lastFrame=0,remainder=0,lastHud=0,lastSent='',lastSentAt=0,menuFrame=0,lastOverlay='';
+let overClick=null,paintKey='';
+function message(text=''){$('error').textContent=text;$('error').hidden=!text;}
+function makeButton(text,fn){
+  const button=document.createElement('button');button.type='button';button.textContent=text;button.onclick=fn;return button;
 }
-function tree(z,offset,seed){
- const h=5+8*random(seed), radius=h*(.16+.07*random(seed+3));
- const [x,y]=roadPoint(z,offset),scale=focal/(z-camZ),w=radius*scale,t=h*scale;
- ctx.fillStyle='#514b3a';ctx.fillRect(x-w*.10,y-t*.43,w*.20,t*.43);
- for(let k=0;k<3;k++){
-  const top=y-t*(1-k*.18),base=top+t*.50,spread=w*(.63+k*.18);
-  face([[x,top],[x+spread,base],[x,base+t*.04],[x-spread,base]],['#36584d','#365c4f','#315649'][k]);
-  face([[x,top],[x-spread,base],[x-w*.14,base-t*.07]],'#527260');
- }
+function makeMenu(){
+  Race.cars.forEach((car,i)=>{
+    const b=makeButton(car.name,()=>{prefs.cars[editSeat]=i;updateMenu();});
+    b.style.setProperty('--paint',car.color);b.dataset.car=i;$('cars').append(b);
+  });
+  Race.tracks.forEach((t,i)=>{
+    const b=makeButton('',()=>{prefs.track=i;updateMenu();});b.dataset.track=i;
+    const canvas=document.createElement('canvas');canvas.setAttribute('aria-hidden','true');
+    const box=document.createElement('span');box.className='tracktext';
+    const title=document.createElement('strong');title.textContent=t.name;
+    const desc=document.createElement('small');desc.textContent=distance(t.length)+' · '+t.roads.length+' yol';
+    box.append(title,desc);b.append(canvas,box);$('tracks').append(b);
+  });
+  $('name').value=prefs.names[0];$('name2').value=prefs.names[1];
+  for(const [index,id] of ['name','name2'].entries())$(id).oninput=()=>{prefs.names[index]=$(id).value;save();};
+  document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{
+    if(busy)disconnect();
+    prefs.mode=b.dataset.mode;editSeat=0;message();updateMenu();
+  });
+  document.querySelectorAll('[data-seat]').forEach(b=>b.onclick=()=>{editSeat=Number(b.dataset.seat);updateMenu();});
+  updateMenu();
 }
-function car(p){
- const z=p.d,x=(p.x/160)*6.8;
- const pt=(a,b,c)=>roadPoint(z+c,x+a,b);
- const quad=(a,b,c,d,col)=>face([pt(...a),pt(...b),pt(...c),pt(...d)],col);
- const body=p.id===0?'#267fc0':'#df632a',light=p.id===0?'#71c4ed':'#ffae61';
- quad([-1.15,.04,-2.3],[1.3,.04,-2.3],[1.55,.04,2.1],[-1,.04,2.1],'#232c2fa8');
- for(const side of [-1,1]){
-  const a=side*.87,b=side*1.07;
-  for(const axle of [-1.35,1.35])quad([a,.09,axle-.38],[b,.09,axle-.38],[b,.64,axle+.38],[a,.64,axle+.38],'#20232a');
- }
- quad([-.98,.66,-2],[.98,.66,-2],[.95,.69,1.85],[-.95,.69,1.85],light);
- quad([-.98,.66,-2],[-.95,.69,1.85],[-.98,.23,1.72],[-1,.27,-1.95],body);
- quad([.98,.66,-2],[.95,.69,1.85],[.98,.23,1.72],[1,.27,-1.95],body);
- quad([-.84,.68,-1.29],[.84,.68,-1.29],[.66,1.27,-.37],[-.66,1.27,-.37],'#314c5a');
- quad([-.66,1.27,-.37],[.66,1.27,-.37],[.61,1.23,.62],[-.61,1.23,.62],light);
- for(const s of [-1,1])quad([s*.84,.68,-1.29],[s*.66,1.27,-.37],[s*.61,1.23,.62],[s*.84,.68,1.3],'#253e4b');
- quad([-.98,.66,-2],[.98,.66,-2],[.9,.25,-2],[-.9,.25,-2],body);
- quad([-.88,.36,-2.02],[.88,.36,-2.02],[.76,.21,-2.02],[-.76,.21,-2.02],'#262d32');
- for(const s of [-1,1])quad([s*.93,.63,-2.03],[s*.44,.61,-2.03],[s*.47,.51,-2.03],[s*.89,.51,-2.03],'#ff5150');
- quad([-.99,.84,-1.91],[.99,.84,-1.91],[.99,.84,-1.62],[-.99,.84,-1.62],'#283139');
+function distance(m){return (m/1000).toLocaleString('tr-TR',{maximumFractionDigits:2})+' km';}
+function menuArt(){
+  if(menuFrame)return;
+  menuFrame=requestAnimationFrame(()=>{
+    menuFrame=0;if($('menu').hidden)return;
+    Scene.garage($('garageArt'),prefs.cars[editSeat]);
+    [...$('tracks').querySelectorAll('canvas')].forEach((canvas,i)=>Scene.preview(canvas,i));
+  });
 }
-function render(){
- requestAnimationFrame(render);
- if(!snapshot||$('game').hidden)return;
- const blend=clamp((performance.now()-stateTime)/50,0,1);
- const players=snapshot.players.map(p=>{
-  const prev=previousState?.players.find(v=>v.id===p.id);
-  if(!prev||snapshot.status!=='racing'||prev.d>p.d)return p;
-  return {...p,d:prev.d+(p.d-prev.d)*blend,x:prev.x+(p.x-prev.x)*blend};
- }).sort((a,b)=>b.d-a.d);
- const self=players.find(p=>p.id===me);
- if(!self)return;
- const z=self.d;
- camZ=z-10;camX=center(camZ)+self.x/160*5.4;camY=altitude(camZ)+3.35;
- yaw=(center(z+25)-center(camZ))/35;
- pitch=(altitude(z+26)-altitude(camZ))/36-.035;
- landscape();
- const first=Math.floor(camZ/step)*step,finish=snapshot.finishAt;
- for(let start=first+step*68;start>=first;start-=step){
-  const near=Math.max(start,camZ+1),far=start+step;
-  if(far<=near)continue;
-  const i=Math.floor(start/step),alt=Math.abs(i%2);
-  strip(near,far,-700,700,alt?'#8c9964':'#909d68');
-  strip(near,far,-8.2,8.2,'#b1ab93');
-  strip(near,far,-7.1,7.1,alt?'#575d60':'#595f62');
-  for(const side of [-1,1]){
-   strip(near,far,side*6.83,side*6.94,'#eee8d8');
-   if(Math.abs(center(start+36)-2*center(start)+center(start-36))>4)
-    strip(near,far,side*7.08,side*7.52,alt?'#bd6957':'#dfd7c4');
-   if(i%2===0 && far-camZ>3)tree(far,side*(12+random(i+side)*15),i+side);
-   if(i%3===0)strip(near,far,side*8.8,side*8.98,'#888f85',.73);
-   // Continuous galvanized rail with regularly spaced supports.
-   const edge=side*9;
-   face([roadPoint(near,edge,.54),roadPoint(far,edge,.54),roadPoint(far,edge,.78),roadPoint(near,edge,.78)],'#a1a9a6');
-   if(start>camZ+2)face([roadPoint(start,edge,0),roadPoint(start,edge+.11,0),roadPoint(start,edge+.11,.55),roadPoint(start,edge,.55)],'#636d68');
+function updateMenu(){
+  const split=prefs.mode==='split',online=prefs.mode==='online',car=Race.cars[prefs.cars[editSeat]],track=Race.trackOf(prefs.track);
+  document.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===prefs.mode)));
+  document.querySelectorAll('[data-car]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.car)===prefs.cars[editSeat])));
+  document.querySelectorAll('[data-track]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.track)===prefs.track)));
+  document.querySelectorAll('[data-seat]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.seat)===editSeat)));
+  $('secondName').hidden=$('seatSwitch').hidden=!split;$('joinForm').hidden=!online;
+  $('nameLabel').textContent=split?'1. oyuncunun adı':'Pilot adı';
+  $('carType').textContent=car.type;$('carName').textContent=car.name;$('top').textContent=car.top;$('accel').textContent=car.accel.toLocaleString('tr-TR');
+  $('modeInfo').textContent=hints[prefs.mode];$('trackInfo').textContent=track.roads.length+' alternatif güzergâh';
+  $('summary').textContent=split ? Race.cars[prefs.cars[0]].name+' / '+Race.cars[prefs.cars[1]].name+' · '+track.name : car.name+' · '+track.name;
+  $('play').firstChild.textContent=online?'Oda oluştur ':'Yarışa başla ';
+  save();menuArt();
+}
+function clearKeys(){
+  for(const k of keyState)for(const name of Object.keys(k))k[name]=false;
+  sendInput(true);
+}
+const held=new Set(),touchKeys=new Set();
+function release(){held.clear();touchKeys.clear();touches.clear();clearKeys();}
+function collectKeys(){
+  const has=(...codes)=>codes.some(c=>held.has(c));
+  const a=keyState[0],b=keyState[1],split=mode==='split';
+  a.up=has('KeyW')||(!split&&has('ArrowUp'))||touchKeys.has('up');
+  a.down=has('KeyS')||(!split&&has('ArrowDown'))||touchKeys.has('down');
+  a.left=has('KeyA')||(!split&&has('ArrowLeft'))||touchKeys.has('left');
+  a.right=has('KeyD')||(!split&&has('ArrowRight'))||touchKeys.has('right');
+  a.boost=has('ShiftLeft')||(!split&&has('ShiftRight'))||touchKeys.has('boost');
+  b.up=has('ArrowUp');b.down=has('ArrowDown');b.left=has('ArrowLeft');b.right=has('ArrowRight');b.boost=has('Enter','NumpadEnter','ShiftRight');
+  sendInput();
+}
+const drivingKeys=['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','ShiftLeft','ShiftRight','Enter','NumpadEnter'];
+window.addEventListener('keydown',e=>{
+  if(!mode || $('guide').open || disconnected || !race)return;
+  if(e.code==='Escape' && mode!=='online' && !e.repeat){e.preventDefault();togglePause();return;}
+  if(!drivingKeys.includes(e.code) || paused || !['countdown','racing'].includes(race.status))return;
+  e.preventDefault();held.add(e.code);collectKeys();
+});
+window.addEventListener('keyup',e=>{if(held.delete(e.code)){e.preventDefault();collectKeys();}});
+window.addEventListener('blur',release);
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){release();if(mode && mode!=='online' && !paused && ['countdown','racing'].includes(race?.status))togglePause();}
+});
+const touches=new Map();
+for(const b of document.querySelectorAll('[data-key]')){
+  b.onpointerdown=e=>{
+    e.preventDefault();b.setPointerCapture(e.pointerId);touches.set(e.pointerId,b.dataset.key);touchKeys.add(b.dataset.key);collectKeys();
+  };
+  const end=e=>{touches.delete(e.pointerId);touchKeys.clear();for(const k of touches.values())touchKeys.add(k);collectKeys();};
+  b.onpointerup=b.onpointercancel=b.onlostpointercapture=end;
+}
+function pilots(){
+  const a={id:0,name:prefs.names[0],car:prefs.cars[0]};
+  if(mode==='split')return [a,{id:1,name:prefs.names[1],car:prefs.cars[1]}];
+  return [a,...['Ada','Bora','Ekin'].map((name,i)=>({id:i+1,name,car:(a.car+i+1)%Race.cars.length,bot:true}))];
+}
+function startLocal(){
+  mode=prefs.mode;myId=0;paused=false;disconnected=false;notice='';previous=null;
+  race=Race.newRace(prefs.track,pilots());enterRace();
+}
+function restart(){
+  if(mode==='online'){emit('start');return;}
+  release();paused=false;previous=null;race=Race.newRace(prefs.track,pilots());
+  remainder=0;lastFrame=performance.now();lastOverlay='';refresh();
+}
+function timeText(time){return Race.formatTime(time);}
+function makeView(id){
+  const node=document.createElement('div');node.className='view';
+  node.innerHTML='<canvas class="world" aria-label="Pist ve araçlar"></canvas><div class="hudTop"><strong></strong><span></span></div><canvas class="map" width="160" height="110" aria-label="Güzergâh haritası"></canvas><div class="dial"><strong>0</strong><small>km/sa</small></div><div class="boost"><small>NİTRO</small><meter min="0" max="100" value="100" aria-label="Nitro seviyesi"></meter></div><div class="routeHint"></div>';
+  $('views').append(node);
+  return {id,node,canvas:node.querySelector('.world'),name:node.querySelector('.hudTop strong'),place:node.querySelector('.hudTop span'),speed:node.querySelector('.dial strong'),meter:node.querySelector('meter'),map:node.querySelector('.map'),route:node.querySelector('.routeHint'),routeKey:''};
+}
+function enterRace(){
+  document.activeElement?.blur?.();release();lastOverlay='';paintKey='';remainder=0;lastFrame=performance.now();lastHud=0;
+  $('menu').hidden=true;$('game').hidden=false;document.body.classList.add('inrace');
+  $('full').hidden=!document.fullscreenEnabled;$('room').hidden=mode!=='online';$('pause').hidden=mode==='online';
+  $('raceMode').textContent=modeNames[mode];$('views').classList.toggle('split',mode==='split');
+  $('views').replaceChildren();views=mode==='split'?[makeView(0),makeView(1)]:[makeView(myId)];
+  $('controlHint').textContent=mode==='split'?'1P · WASD / sol Shift     •     2P · Yön tuşları / Enter':'WASD veya yön tuşları · Shift ile nitro';
+  if(mode==='online')$('room').textContent='Oda '+roomCode+' ⧉';
+  touchVisibility();message();refresh();
+  $('game').scrollIntoView({block:'nearest'});
+}
+function touchVisibility(){
+  $('touch').hidden=mode==='split'||!mode||!(matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0);
+}
+function showMenu(){
+  release();disconnect();mode='';race=null;previous=null;views=[];paused=false;disconnected=false;notice='';
+  $('game').hidden=true;$('menu').hidden=false;$('full').hidden=true;document.body.classList.remove('inrace');
+  $('views').replaceChildren();message();updateMenu();
+  if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});
+  window.scrollTo(0,0);
+}
+function togglePause(){
+  if(!race || mode==='online' || !['racing','countdown'].includes(race.status))return;
+  release();paused=!paused;remainder=0;lastFrame=performance.now();refresh();
+}
+function setBusy(value){
+  busy=value;$('play').disabled=$('join').disabled=value;
+}
+function disconnect(){
+  const old=socket;socket=null;setBusy(false);
+  if(old){if(old.readyState===WebSocket.OPEN)old.send(JSON.stringify({type:'leave'}));old.close();}
+  roomCode='';lastSent='';
+}
+function emit(type,extra={}){
+  if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type,...extra}));
+}
+function sendInput(force=false){
+  if(mode!=='online'||!race||!['countdown','racing'].includes(race.status)||socket?.readyState!==WebSocket.OPEN)return;
+  const now=performance.now(),serialized=JSON.stringify(keyState[0]);
+  if(force||lastSent!==serialized||now-lastSentAt>400){
+    emit('input',{keys:keyState[0]});lastSent=serialized;lastSentAt=now;
   }
-  if(alt)strip(near,far,-.07,.07,'#e6dfca');
-  if(finish>=start&&finish<far&&finish>camZ+1){
-   for(let row=0;row<2;row++)for(let col=0;col<20;col++)
-    strip(finish+row*.68,finish+(row+1)*.68,-6.8+col*.68,-6.8+(col+1)*.68,(col+row)%2?'#273038':'#f1efe6');
-  }
-  for(const p of players)
-   if(p.d>=start&&p.d<far&&p.d>camZ+24)car(p);
- }
- for(const p of players)if(p.d>camZ+3&&p.d<=camZ+24)car(p);
- ctx.fillStyle='#13202cd9';ctx.fillRect(20,18,155,37);
- ctx.fillStyle='#f3f6f4';ctx.font='bold 18px system-ui';ctx.fillText('BİTİŞ  '+Math.max(0,Math.round(finish-z))+' m',31,44);
 }
-render();
+function online(action){
+  if(busy)return;
+  const code=$('code').value.trim();
+  if(action==='join'&&!/^[0-9]{6}$/.test(code)){message('6 haneli oda kodunu gir.');return;}
+  disconnect();setBusy(true);message();
+  const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);socket=ws;
+  const timeout=setTimeout(()=>{if(socket===ws && busy){disconnect();message('Bağlantı zaman aşımına uğradı. Tekrar dene.');}},18000);
+  ws.onopen=()=>{if(ws===socket) emit(action,{version:2,name:prefs.names[0],car:prefs.cars[0],track:prefs.track,code});};
+  ws.onmessage=e=>{
+    if(ws!==socket)return;
+    let m;try{m=JSON.parse(e.data);}catch{return;}
+    if(m.type==='error'){clearTimeout(timeout);disconnect();message(m.message);return;}
+    if(m.type==='notice'){notice=m.message;return;}
+    if(m.type==='joined'){myId=m.id;roomCode=m.code;return;}
+    if(m.type!=='state')return;
+    clearTimeout(timeout);setBusy(false);hostId=m.hostId;
+    const fresh=mode!=='online';
+    if(fresh){mode='online';paused=false;disconnected=false;notice='';}
+    previous=!fresh&&m.status==='racing'&&race?.status==='racing'?race:null;
+    race=m;stateAt=performance.now();
+    if(race.players.length===2)notice='';
+    if(fresh||views[0]?.id!==myId)enterRace();else refresh();
+  };
+  ws.onerror=()=>{if(socket===ws&&!mode)message('Sunucuya bağlanılamadı. Tekrar dene.');};
+  ws.onclose=()=>{
+    clearTimeout(timeout);if(ws!==socket)return;setBusy(false);socket=null;
+    if(mode==='online'){disconnected=true;release();refresh();}
+    else message('Bağlantı kurulamadı. Tekrar dene.');
+  };
+}
+function interpolated(now){
+  if(!previous||mode!=='online'||race.status!=='racing')return race;
+  const alpha=Race.clamp((now-stateAt)/50,0,1);
+  return {...race,players:race.players.map(p=>{
+    const old=previous.players.find(v=>v.id===p.id);
+    if(!old||old.gate!==p.gate||old.route!==p.route||p.done)return p;
+    return {...p,d:old.d+(p.d-old.d)*alpha,x:old.x+(p.x-old.x)*alpha};
+  })};
+}
+function overlay(key,label,title,text,action,fn,back=false,displayResults=false){
+  if(key===lastOverlay)return;lastOverlay=key;
+  $('overlay').hidden=!key;if(!key)return;
+  $('overLabel').textContent=label;$('overTitle').textContent=title;$('overText').textContent=text;
+  $('overAction').hidden=!action;$('overAction').textContent=action||'';overClick=fn;$('back').hidden=!back;
+  $('results').hidden=!displayResults;
+  if(displayResults){
+    $('results').replaceChildren();
+    Race.order(race).forEach(p=>{
+      const li=document.createElement('li'),n=document.createElement('span'),s=document.createElement('b');
+      n.textContent=p.rank+'. '+p.name+(p.bot?' · Bot':'');s.textContent=timeText(p.time);
+      li.append(n,s);$('results').append(li);
+    });
+  }
+}
+function refresh(){
+  if(!race)return;
+  const track=Race.trackOf(race.track);$('raceTrack').textContent=track.name;
+  $('pause').textContent=paused?'Devam et':'Duraklat';
+  if(disconnected){overlay('lost','ÇEVRİMİÇİ','Bağlantı kesildi','Yeni bir oda kurabilir veya kodla tekrar katılabilirsin.','Garaja dön',showMenu);return;}
+  if(paused){overlay('paused',modeNames[mode],'Yarış duraklatıldı','Hazır olduğunda kaldığın yerden devam et.','Devam et',togglePause,true);return;}
+  if(race.status==='waiting'){
+    const two=race.players.length===2,host=myId===hostId;
+    overlay('wait'+roomCode+two+host+notice,'ODA '+roomCode,two?'İki pilot hazır':'Rakip bekleniyor',two?(host?'İkiniz de hazırsanız startı ver.':'Oda sahibi yarışı başlatacak.'):(notice||'Arkadaşın çevrimiçi modda oda kodunu girerek katılabilir.'),two&&host?'Yarışı başlat':'',()=>emit('start'));return;
+  }
+  if(race.status==='countdown'){
+    const n=Math.max(1,Math.ceil(race.countdown-.00001));
+    overlay('count'+n,track.name,''+n,'Start için gazı basılı tut.');return;
+  }
+  if(race.status==='finished'){
+    const win=Race.order(race)[0],can=mode!=='online'||myId===hostId;
+    overlay('end'+win.id,track.name,win.name+' kazandı',can?'Yarış sonuçları':'Rövanşı oda sahibi başlatabilir.',can?'Tekrar yarış':'',restart,true,true);return;
+  }
+  overlay('',null,null,null);
+}
+const mapCache=new Map();
+function mapData(t){
+  if(mapCache.has(t))return mapCache.get(t);
+  const points=[];
+  const add=(start,end,route,gate)=>{
+    const part=[];const count=Math.ceil((end-start)/24);
+    for(let i=0;i<=count;i++){const z=start+(end-start)*i/count;part.push([Race.road(t,z,route,gate).x,z]);}
+    points.push(part);
+  };
+  let last=0;
+  t.gates.forEach(([start,end],g)=>{add(last,start,-1,-1);for(let k=0;k<t.roads.length;k++)add(start,end,k,g);last=end;});add(last,t.length,-1,-1);
+  const xs=points.flat().map(p=>p[0]),min=Math.min(...xs),max=Math.max(...xs);
+  const pos=(x,z)=>[9+142*Race.clamp(z/t.length,0,1),99-(x-min)/(max-min)*86];
+  const result={points:points.map(path=>path.map(([x,z])=>pos(x,z))),pos};mapCache.set(t,result);return result;
+}
+function minimap(canvas,t,all,self){
+  const ctx=canvas.getContext('2d'),map=mapData(t);ctx.clearRect(0,0,160,110);
+  ctx.strokeStyle='#bfccc0';ctx.lineWidth=2.7;ctx.lineJoin='round';ctx.lineCap='round';
+  for(const path of map.points){ctx.beginPath();ctx.moveTo(...path[0]);for(let j=1;j<path.length;j++)ctx.lineTo(...path[j]);ctx.stroke();}
+  for(const p of [...all.filter(p=>p.id!==self),...all.filter(p=>p.id===self)]){
+    const [x,y]=map.pos(Race.road(t,p.d,p.route,p.gate).x+p.x,p.d);
+    ctx.fillStyle=p.id===self?'#d6f66b':'#ff9879';ctx.beginPath();ctx.arc(x,y,p.id===self?4.5:3.4,0,Math.PI*2);ctx.fill();
+  }
+}
+function showRoute(view,t,p){
+  const next=Race.upcoming(t,p.d),remaining=next>=0?t.gates[next][0]-p.d:Infinity;
+  const approaching=p.gate<0 && remaining<=150;
+  const selected=p.gate>=0?p.route:Race.choice(t,p.x);
+  const label=p.done?p.rank+'. sırada bitirdin':p.gate>=0?t.roads[p.route]+' güzergâhı':approaching?'Yol ayrımı · '+Math.max(0,Math.ceil(remaining/10)*10)+' m':'';
+  const key=label+'|'+(approaching?selected:-1);
+  if(key===view.routeKey)return;view.routeKey=key;view.route.replaceChildren();
+  if(!label)return;
+  const title=document.createElement('b');title.textContent=label;view.route.append(title);
+  if(approaching){
+    const row=document.createElement('div');row.className='routeOptions';
+    t.roads.forEach((name,i)=>{const span=document.createElement('span');span.textContent=name;if(i===selected)span.className='active';row.append(span);});
+    view.route.append(row);
+  }
+}
+function hud(state){
+  const t=Race.trackOf(state.track),sorted=Race.order(state);
+  for(const v of views){
+    const p=state.players.find(p=>p.id===v.id);if(!p)continue;
+    v.name.textContent=p.name+' · '+Race.cars[p.car].name;
+    v.place.textContent=(sorted.findIndex(s=>s.id===p.id)+1)+'/'+state.players.length+' sıra · '+Math.round(Math.max(0,t.length-p.d))+' m';
+    v.speed.textContent=Math.round(p.v*3.6);v.meter.value=p.nitro;v.map.title='Pist krokisi';minimap(v.map,t,state.players,p.id);showRoute(v,t,p);
+  }
+  $('raceClock').textContent=timeText(state.elapsed);
+}
+function frame(now){
+  requestAnimationFrame(frame);
+  if(!mode||!race||document.hidden)return;
+  const dt=Math.min(.15,Math.max(0,(now-lastFrame)/1000));lastFrame=now;
+  if(mode!=='online'&&!paused){
+    remainder+=dt;
+    while(remainder>=1/60){Race.step(race,keyState,1/60);remainder-=1/60;}
+  }
+  if(mode==='online')sendInput();
+  if(!lastHud || now-lastHud>80){lastHud=now;hud(race);refresh();}
+  const moving=!paused && !disconnected && race.status==='racing';
+  const stillKey=[race.track,race.status,paused,disconnected,...race.players.map(p=>p.id+'-'+p.car)].join('|');
+  if(moving || paintKey!==stillKey){
+    const visibleRace=interpolated(now);
+    for(const view of views)Scene.draw(view.canvas,visibleRace,view.id);
+    paintKey=stillKey;
+  }
+}
+$('play').onclick=()=>prefs.mode==='online'?online('create'):startLocal();
+$('joinForm').onsubmit=e=>{e.preventDefault();online('join');};
+$('code').oninput=()=>{$('code').value=$('code').value.replace(/[^0-9]/g,'').slice(0,6);message();};
+$('room').onclick=async()=>{
+  try{await navigator.clipboard.writeText(roomCode);$('room').textContent='Kopyalandı';setTimeout(()=>{if(mode==='online')$('room').textContent='Oda '+roomCode+' ⧉';},1200);}
+  catch{window.prompt('Oda kodu',roomCode);}
+};
+$('exit').onclick=$('back').onclick=showMenu;$('pause').onclick=togglePause;$('overAction').onclick=()=>overClick?.();
+$('help').onclick=()=>{if(mode && mode!=='online'&&!paused)togglePause();$('guide').showModal();};
+$('full').onclick=()=>{(document.fullscreenElement?document.exitFullscreen():$('game').requestFullscreen()).catch(()=>{});};
+document.addEventListener('fullscreenchange',()=>{$('full').textContent=document.fullscreenElement?'Tam ekrandan çık':'Tam ekran';});
+window.addEventListener('resize',()=>{paintKey='';menuArt();touchVisibility();});
+makeMenu();
+if(window.ResizeObserver)new ResizeObserver(menuArt).observe($('garageArt'));
+requestAnimationFrame(frame);
