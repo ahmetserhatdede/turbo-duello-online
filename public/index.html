@@ -1,5 +1,67 @@
-<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Turbo Düello — 2 Kişilik Araba Yarışı</title><link rel="stylesheet" href="/style.css"></head><body>
-<main><header><span class="logo">🏁 TURBO <b>DÜELLO</b></span><span class="tag">2 KİŞİLİK ONLINE YARIŞ</span></header>
-<section id="lobby" class="panel"><div class="badge">ARKADAŞINLA YARIŞ</div><h1>Hazır mısın?<br><em>Gaza bas!</em></h1><p>Bir oda oluştur, 6 haneli kodu arkadaşına gönder ve kimin daha hızlı olduğunu gör.</p><label for="name">OYUNCU ADIN</label><input id="name" maxlength="16" placeholder="Takma adın" value="Oyuncu"><div class="buttons"><button id="create">🏎️ ODA OLUŞTUR</button></div><div class="or">VEYA KODLA KATIL</div><div class="join"><input id="code" maxlength="6" inputmode="numeric" placeholder="6 haneli kod"><button id="join">KATIL →</button></div><p class="error" id="error"></p></section>
-<section id="game" hidden><div class="top"><div><span class="tiny">ODA KODU</span><div class="room"><strong id="roomCode">------</strong><button id="copy" class="sub">KOPYALA</button></div></div><div class="status" id="status">Rakip bekleniyor...</div><button id="leave" class="sub">AYRIL</button></div><div class="score"><div><span class="square blue"></span><span id="p0">Oyuncu 1</span><b id="s0">0 m</b></div><div><span class="square orange"></span><span id="p1">Oyuncu 2</span><b id="s1">0 m</b></div></div><div class="trackbox"><canvas id="canvas" width="520" height="640"></canvas><div id="overlay" class="overlay"><h2>Rakibin bekleniyor...</h2><p>Oda kodunu arkadaşına gönder</p><button id="start" hidden>🏁 YARIŞI BAŞLAT</button></div></div><div class="controls">🎮 <b>W / ↑</b> Gaz &nbsp; • &nbsp; <b>S / ↓</b> Fren &nbsp; • &nbsp; <b>A D / ← →</b> Direksiyon</div><div class="mobile"><button data-key="left">◀</button><button data-key="up">▲ GAZ</button><button data-key="down">▼ FREN</button><button data-key="right">▶</button></div></section>
-<footer>İki farklı cihazdan aynı internet adresini açın. İlk bitiren kazanır! 🏆</footer></main><script src="/game.js"></script></body></html>
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111817">
+  <title>Turbo Düello | Yarış Garajı</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/race.js"></script>
+  <script defer src="/scene.js"></script>
+  <script defer src="/game.js"></script>
+</head>
+<body>
+<header class="mast">
+  <div class="brand" aria-label="Turbo Düello"><i class="mark" aria-hidden="true"></i>TURBO <em>DÜELLO</em></div>
+  <div class="actions"><button id="help" class="quiet">Kontroller <b aria-hidden="true">?</b></button><button id="full" class="quiet" hidden>Tam ekran</button></div>
+</header>
+<main>
+  <section id="menu" aria-label="Yarış garajı">
+    <h1>Yarış garajı<span>.</span></h1>
+    <div class="setup">
+      <section class="garage panel" aria-label="Araç seçimi">
+        <div class="showcase">
+          <canvas id="garageArt" aria-label="Seçili aracın üç boyutlu önizlemesi"></canvas>
+          <div class="model"><span id="carType" class="eyebrow"></span><h2 id="carName"></h2></div>
+          <div class="specs"><div><small>AZAMİ HIZ</small><strong id="top"></strong> <span>km/sa</span></div><div><small>İVMELENME</small><strong id="accel"></strong> <span>m/s²</span></div></div>
+        </div>
+        <div class="selection"><div class="sectionline"><h3>Araç seçimi</h3><div class="switch" id="seatSwitch" aria-label="Aracı seçilen oyuncu" hidden><button data-seat="0" aria-pressed="true">1. oyuncu</button><button data-seat="1" aria-pressed="false">2. oyuncu</button></div></div><div id="cars" class="carlist"></div></div>
+      </section>
+      <section class="settings panel" aria-label="Yarış ayarları">
+        <h2>Yarış modu</h2>
+        <div class="modes" aria-label="Oyun modu">
+          <button data-mode="solo" aria-pressed="true"><span class="mode-icon" aria-hidden="true">◎</span><span>Tek kişilik</span></button>
+          <button data-mode="split" aria-pressed="false"><span class="mode-icon" aria-hidden="true">◫</span><span>Bölünmüş ekran</span></button>
+          <button data-mode="online" aria-pressed="false"><span class="mode-icon" aria-hidden="true">⌁</span><span>Çevrimiçi</span></button>
+        </div>
+        <p id="modeInfo" class="hint"></p>
+        <div class="names"><label><span id="nameLabel">Pilot adı</span><input id="name" maxlength="16" value="Pilot 1" autocomplete="off"></label>
+          <label id="secondName" hidden>2. oyuncunun adı<input id="name2" maxlength="16" value="Pilot 2" autocomplete="off"></label></div>
+        <div class="launch"><div class="selectionSummary" id="summary"></div><button id="play" class="primary">Yarışa başla <span aria-hidden="true">↗</span></button></div>
+        <form id="joinForm" hidden><label for="code">Oda koduyla katıl</label><div class="joinRow"><input id="code" placeholder="6 haneli kod" maxlength="6" inputmode="numeric" pattern="[0-9]{6}" autocomplete="off"><button id="join" type="submit" class="secondary">Katıl →</button></div></form>
+        <p id="error" class="error" role="alert" hidden></p>
+      </section>
+    </div>
+    <section class="circuits" aria-label="Pist seçimi"><div class="sectionline"><h2>Pist seçimi</h2><span id="trackInfo" class="muted"></span></div><div id="tracks" class="tracklist"></div></section>
+  </section>
+  <section id="game" hidden aria-label="Yarış">
+    <div class="racebar"><div><span id="raceMode" class="eyebrow"></span><h2 id="raceTrack"></h2></div><div class="actions"><button id="room" class="secondary" title="Oda kodunu kopyala" hidden></button><button id="pause" class="quiet">Duraklat</button><button id="exit" class="quiet">Garaja dön</button></div></div>
+    <div id="arena">
+      <div id="views"></div>
+      <div id="overlay" class="overlay" hidden><div class="overlaycard"><span id="overLabel" class="eyebrow"></span><h2 id="overTitle"></h2><p id="overText"></p><ol id="results" hidden></ol><div class="overlayBtns"><button id="overAction" class="primary" hidden></button><button id="back" class="quiet" hidden>Garaja dön</button></div></div></div>
+    </div>
+    <div id="touch" class="touch" aria-label="Dokunmatik sürüş kontrolleri" hidden>
+      <div><button data-key="left" aria-label="Sola dön">◀</button><button data-key="right" aria-label="Sağa dön">▶</button></div>
+      <div><button data-key="boost">N₂O</button><button data-key="down">Fren</button><button data-key="up">Gaz</button></div>
+    </div>
+    <div id="raceFoot"><span id="controlHint"></span><span id="raceClock"></span></div>
+  </section>
+</main>
+<dialog id="guide"><form method="dialog"><button class="close" aria-label="Kapat">×</button></form><h2>Kontroller</h2><dl>
+  <dt>Tek kişilik ve çevrimiçi</dt><dd>WASD veya yön tuşlarıyla sür. Gaz verirken Shift tuşuyla nitro kullan.</dd>
+  <dt>Bölünmüş ekran</dt><dd>1. oyuncu WASD ve sol Shift, 2. oyuncu yön tuşları ve Enter veya sağ Shift kullanır.</dd>
+  <dt>Yol ayrımları</dt><dd>Kapıdan önce istediğin yolun şeridine geç. Yollar ileride ana piste bağlanır. Çakıla çıkarsan hız kaybedersin.</dd>
+  <dt>Nitro</dt><dd>Gaz ve nitroyu birlikte basılı tut. Nitro tuşunu bırakınca depo yeniden dolar.</dd>
+  <dt>Duraklatma</dt><dd>Tek kişilik ve bölünmüş ekranda Esc ile yarışı duraklatıp devam ettirebilirsin.</dd>
+</dl></dialog>
+</body></html>
