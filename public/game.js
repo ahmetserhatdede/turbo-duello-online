@@ -37,7 +37,7 @@ function makeMenu(){
     const canvas=document.createElement('canvas');canvas.setAttribute('aria-hidden','true');
     const box=document.createElement('span');box.className='tracktext';
     const title=document.createElement('strong');title.textContent=t.name;
-    const desc=document.createElement('small');desc.textContent=distance(t.length)+' · '+t.roads.length+' yol';
+    const desc=document.createElement('small');desc.textContent=t.laps?t.laps+' tur × '+distance(t.length):distance(t.length)+' · '+t.roads.length+' yol';
     box.append(title,desc);b.append(canvas,box);$('tracks').append(b);
   });
   $('name').value=prefs.names[0];$('name2').value=prefs.names[1];
@@ -67,7 +67,7 @@ function updateMenu(){
   $('secondName').hidden=$('seatSwitch').hidden=!split;$('joinForm').hidden=!online;
   $('nameLabel').textContent=split?'1. oyuncunun adı':'Pilot adı';
   $('carType').textContent=car.type;$('carName').textContent=car.name;$('top').textContent=car.top;$('accel').textContent=car.accel.toLocaleString('tr-TR');
-  $('modeInfo').textContent=hints[prefs.mode];$('trackInfo').textContent=track.roads.length+' alternatif güzergâh';
+  $('modeInfo').textContent=hints[prefs.mode];$('trackInfo').textContent=track.laps?'Grand Prix · '+track.laps+' tur · '+distance(Race.total(track)):track.roads.length+' alternatif güzergâh';
   $('summary').textContent=split ? Race.cars[prefs.cars[0]].name+' / '+Race.cars[prefs.cars[1]].name+' · '+track.name : car.name+' · '+track.name;
   $('play').firstChild.textContent=online?'Oda oluştur ':'Yarışa başla ';
   save();menuArt();
@@ -126,9 +126,9 @@ function restart(){
 function timeText(time){return Race.formatTime(time);}
 function makeView(id){
   const node=document.createElement('div');node.className='view';
-  node.innerHTML='<canvas class="world" aria-label="Pist ve araçlar"></canvas><div class="hudTop"><strong></strong><span></span></div><canvas class="map" width="160" height="110" aria-label="Güzergâh haritası"></canvas><div class="dial"><strong>0</strong><small>km/sa</small></div><div class="boost"><small>NİTRO</small><meter min="0" max="100" value="100" aria-label="Nitro seviyesi"></meter></div><div class="routeHint"></div>';
+  node.innerHTML='<canvas class="world" aria-label="Pist ve araçlar"></canvas><div class="hudTop"><strong></strong><span></span><small class="lapHud" hidden></small></div><canvas class="map" width="160" height="110" aria-label="Güzergâh haritası"></canvas><div class="dial"><strong>0</strong><small>km/sa</small></div><div class="boost"><small>NİTRO <b class="fuel">0%</b></small><meter min="0" max="100" value="0" aria-label="Nitro seviyesi"></meter><span class="pickupGain" hidden></span></div><div class="routeHint"></div>';
   $('views').append(node);
-  return {id,node,canvas:node.querySelector('.world'),name:node.querySelector('.hudTop strong'),place:node.querySelector('.hudTop span'),speed:node.querySelector('.dial strong'),meter:node.querySelector('meter'),map:node.querySelector('.map'),route:node.querySelector('.routeHint'),routeKey:''};
+  return {id,node,canvas:node.querySelector('.world'),name:node.querySelector('.hudTop strong'),place:node.querySelector('.hudTop span'),lap:node.querySelector('.lapHud'),fuel:node.querySelector('.fuel'),gain:node.querySelector('.pickupGain'),speed:node.querySelector('.dial strong'),meter:node.querySelector('meter'),map:node.querySelector('.map'),route:node.querySelector('.routeHint'),routeKey:''};
 }
 function enterRace(){
   document.activeElement?.blur?.();release();lastOverlay='';paintKey='';remainder=0;lastFrame=performance.now();lastHud=0;
@@ -209,7 +209,9 @@ function interpolated(now){
   return {...race,players:race.players.map(p=>{
     const old=previous.players.find(v=>v.id===p.id);
     if(!old||old.gate!==p.gate||old.route!==p.route||p.done)return p;
-    return {...p,d:old.d+(p.d-old.d)*alpha,x:old.x+(p.x-old.x)*alpha};
+    return {...p,d:old.d+(p.d-old.d)*alpha,x:old.x+(p.x-old.x)*alpha,
+      heading:(old.heading||0)+((p.heading||0)-(old.heading||0))*alpha,
+      frontAngle:(old.frontAngle||0)+((p.frontAngle||0)-(old.frontAngle||0))*alpha};
   })};
 }
 function overlay(key,label,title,text,action,fn,back=false,displayResults=false){
@@ -222,7 +224,7 @@ function overlay(key,label,title,text,action,fn,back=false,displayResults=false)
     $('results').replaceChildren();
     Race.order(race).forEach(p=>{
       const li=document.createElement('li'),n=document.createElement('span'),s=document.createElement('b');
-      n.textContent=p.rank+'. '+p.name+(p.bot?' · Bot':'');s.textContent=timeText(p.time);
+      n.textContent=p.rank+'. '+p.name+(p.bot?' · Bot':'');s.textContent=timeText(p.time)+(Race.trackOf(race.track).laps && p.bestLap?' · En iyi '+timeText(p.bestLap):'');
       li.append(n,s);$('results').append(li);
     });
   }
@@ -252,14 +254,20 @@ function mapData(t){
   if(mapCache.has(t))return mapCache.get(t);
   const points=[];
   const add=(start,end,route,gate)=>{
-    const part=[];const count=Math.ceil((end-start)/24);
-    for(let i=0;i<=count;i++){const z=start+(end-start)*i/count;part.push([Race.road(t,z,route,gate).x,z]);}
+    const part=[],count=Math.max(1,Math.ceil((end-start)/12));
+    for(let i=0;i<=count;i++){
+      const d=start+(end-start)*i/count,q=Race.sample(t,d,route,gate);
+      part.push([q.x,q.z]);
+    }
     points.push(part);
   };
   let last=0;
   t.gates.forEach(([start,end],g)=>{add(last,start,-1,-1);for(let k=0;k<t.roads.length;k++)add(start,end,k,g);last=end;});add(last,t.length,-1,-1);
-  const xs=points.flat().map(p=>p[0]),min=Math.min(...xs),max=Math.max(...xs);
-  const pos=(x,z)=>[9+142*Race.clamp(z/t.length,0,1),99-(x-min)/(max-min)*86];
+  const all=points.flat(),xs=all.map(p=>p[0]),zs=all.map(p=>p[1]);
+  const xmin=Math.min(...xs),xmax=Math.max(...xs),zmin=Math.min(...zs),zmax=Math.max(...zs);
+  const size=Math.min(140/(xmax-xmin),86/(zmax-zmin));
+  const pos=t.laps?(x,z)=>[80+(x-(xmin+xmax)/2)*size,55-(z-(zmin+zmax)/2)*size]:
+    (x,z)=>[9+142*(z-zmin)/(zmax-zmin),99-(x-xmin)/(xmax-xmin)*86];
   const result={points:points.map(path=>path.map(([x,z])=>pos(x,z))),pos};mapCache.set(t,result);return result;
 }
 function minimap(canvas,t,all,self){
@@ -267,15 +275,16 @@ function minimap(canvas,t,all,self){
   ctx.strokeStyle='#bfccc0';ctx.lineWidth=2.7;ctx.lineJoin='round';ctx.lineCap='round';
   for(const path of map.points){ctx.beginPath();ctx.moveTo(...path[0]);for(let j=1;j<path.length;j++)ctx.lineTo(...path[j]);ctx.stroke();}
   for(const p of [...all.filter(p=>p.id!==self),...all.filter(p=>p.id===self)]){
-    const [x,y]=map.pos(Race.road(t,p.d,p.route,p.gate).x+p.x,p.d);
+    const position=Race.sample(t,p.d,p.route,p.gate,p.x),[x,y]=map.pos(position.x,position.z);
     ctx.fillStyle=p.id===self?'#d6f66b':'#ff9879';ctx.beginPath();ctx.arc(x,y,p.id===self?4.5:3.4,0,Math.PI*2);ctx.fill();
   }
 }
 function showRoute(view,t,p){
-  const next=Race.upcoming(t,p.d),remaining=next>=0?t.gates[next][0]-p.d:Infinity;
+  const next=Race.upcoming(t,p.d),remaining=Race.toGate(t,p.d,next);
   const approaching=p.gate<0 && remaining<=150;
   const selected=p.gate>=0?p.route:Race.choice(t,p.x);
-  const label=p.done?p.rank+'. sırada bitirdin':p.gate>=0?t.roads[p.route]+' güzergâhı':approaching?'Yol ayrımı · '+Math.max(0,Math.ceil(remaining/10)*10)+' m':'';
+  const lapFlash=t.laps && p.completedLaps>0 && race.elapsed-p.lapStart<2.8;
+  const label=p.done?p.rank+'. sırada bitirdin':lapFlash?(p.completedLaps===t.laps-1?'Son tur':'Tur '+(p.completedLaps+1))+' · '+timeText(p.lastLap):p.gate>=0?t.roads[p.route]+' güzergâhı':approaching?'Yol ayrımı · '+Math.max(0,Math.ceil(remaining/10)*10)+' m':'';
   const key=label+'|'+(approaching?selected:-1);
   if(key===view.routeKey)return;view.routeKey=key;view.route.replaceChildren();
   if(!label)return;
@@ -291,8 +300,15 @@ function hud(state){
   for(const v of views){
     const p=state.players.find(p=>p.id===v.id);if(!p)continue;
     v.name.textContent=p.name+' · '+Race.cars[p.car].name;
-    v.place.textContent=(sorted.findIndex(s=>s.id===p.id)+1)+'/'+state.players.length+' sıra · '+Math.round(Math.max(0,t.length-p.d))+' m';
-    v.speed.textContent=Math.round(p.v*3.6);v.meter.value=p.nitro;v.map.title='Pist krokisi';minimap(v.map,t,state.players,p.id);showRoute(v,t,p);
+    const position=(sorted.findIndex(s=>s.id===p.id)+1)+'/'+state.players.length+' sıra';
+    const lap=Math.min(t.laps||1,(p.completedLaps||0)+1);
+    v.place.textContent=t.laps?'Tur '+lap+'/'+t.laps+' · '+position:position+' · '+Math.round(Math.max(0,state.finishAt-p.d))+' m';
+    v.lap.hidden=!t.laps;
+    if(t.laps)v.lap.textContent='Tur '+timeText(p.done?p.lastLap:Math.max(0,state.elapsed-p.lapStart))+(p.bestLap?' · En iyi '+timeText(p.bestLap):'');
+    v.speed.textContent=Math.round(p.v*3.6);v.meter.value=p.nitro;v.fuel.textContent=Math.round(p.nitro)+'%';
+    const collected=state.elapsed-p.lastPickupAt<1.35 && p.lastPickupGain>0;
+    v.gain.hidden=!collected;if(collected)v.gain.textContent='+'+Math.round(p.lastPickupGain)+' nitro';
+    v.map.title='Pist krokisi';minimap(v.map,t,state.players,p.id);showRoute(v,t,p);
   }
   $('raceClock').textContent=timeText(state.elapsed);
 }
